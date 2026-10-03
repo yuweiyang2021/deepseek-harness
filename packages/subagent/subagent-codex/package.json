@@ -30,6 +30,14 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "capabilities": {
+      "schemaVersion": 1,
+      "executionModel": "one-shot",
+      "sessionLifecycle": "ephemeral",
+      "continuation": false,
+      "resume": false,
+      "pooling": false
     }
   },
   "peerDependencies": {
