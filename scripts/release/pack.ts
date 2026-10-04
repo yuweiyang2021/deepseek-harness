@@ -19,6 +19,15 @@ import { PUBLISH_ORDER_FILE, tarballFiles } from './tarball.ts'
 const DEFAULT_OUTPUT = 'dist/npm'
 
 /**
+ * Repository-owned pnpmfile that canonicalizes each publish manifest's
+ * dependency maps. pnpm fills those maps from concurrently resolved promises,
+ * so without the hook two packs of one commit produce different bytes. The path
+ * is absolute and passed explicitly, so the hook applies whatever workspace
+ * directory a member resolves from.
+ */
+const PNPMFILE = resolve(import.meta.dirname, 'deterministic-pack.pnpmfile.cjs')
+
+/**
  * Pack one member and check what its tarball carries.
  * @param family - the release family being packed.
  * @param member - the member to pack.
@@ -26,7 +35,14 @@ const DEFAULT_OUTPUT = 'dist/npm'
  * @returns The tarball filename.
  */
 async function packMember(family: ReleaseFamily, member: ReleaseMember, destination: string): Promise<string> {
-  const invocation = pnpmInvocation(['--dir', member.directory, 'pack', '--pack-destination', destination])
+  const invocation = pnpmInvocation([
+    '--dir',
+    member.directory,
+    'pack',
+    '--pack-destination',
+    destination,
+    `--config.pnpmfile=${PNPMFILE}`,
+  ])
   await runConcurrent(invocation.command, invocation.args)
 
   const filename = tarballName(member)
