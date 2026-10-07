@@ -725,6 +725,186 @@ describe('task admission and package contracts', () => {
   })
 })
 
+/**
+ * Read the package manifest bytes from disk. The capability descriptor is
+ * asserted against what actually ships, never an imported or re-declared copy.
+ */
+function readPackageManifest(): Record<string, unknown> {
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  const bytes = readFileSync(resolve(root, 'package.json'))
+  return JSON.parse(bytes.toString('utf8')) as Record<string, unknown>
+}
+
+const CAPABILITY_KEYS = [
+  'schemaVersion',
+  'executionModel',
+  'sessionLifecycle',
+  'continuation',
+  'resume',
+  'pooling',
+] as const
+
+const CAPABILITY_JSON_TYPES = {
+  schemaVersion: 'number',
+  executionModel: 'string',
+  sessionLifecycle: 'string',
+  continuation: 'boolean',
+  resume: 'boolean',
+  pooling: 'boolean',
+} as const
+
+const SCHEMA_V1_CAPABILITIES = {
+  schemaVersion: 1,
+  executionModel: 'one-shot',
+  sessionLifecycle: 'ephemeral',
+  continuation: false,
+  resume: false,
+  pooling: false,
+} as const
+
+/** Name of a parsed JSON value's type, keeping null and arrays distinct from objects. */
+function jsonType(value: unknown): string {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  return typeof value
+}
+
+/** Every way `dsh.capabilities` diverges from schema version 1; empty means exact. */
+function capabilityViolations(value: unknown): string[] {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return [`dsh.capabilities must be a JSON object, received ${jsonType(value)}`]
+  }
+  const capabilities = value as Record<string, unknown>
+  const violations: string[] = []
+  for (const key of CAPABILITY_KEYS) {
+    if (!Object.hasOwn(capabilities, key)) {
+      violations.push(`dsh.capabilities.${key} is missing`)
+    }
+  }
+  for (const key of Object.keys(capabilities)) {
+    if (!(CAPABILITY_KEYS as readonly string[]).includes(key)) {
+      violations.push(`dsh.capabilities.${key} is unknown to schema version 1`)
+    }
+  }
+  for (const key of CAPABILITY_KEYS) {
+    if (!Object.hasOwn(capabilities, key)) continue
+    const expectedType = CAPABILITY_JSON_TYPES[key]
+    const actualType = jsonType(capabilities[key])
+    if (actualType !== expectedType) {
+      violations.push(
+        `dsh.capabilities.${key} must be a JSON ${expectedType}, received ${actualType}`,
+      )
+    }
+  }
+  if (
+    jsonType(capabilities.schemaVersion) === 'number'
+    && capabilities.schemaVersion !== 1
+  ) {
+    violations.push(
+      `dsh.capabilities.schemaVersion must be 1, received ${JSON.stringify(capabilities.schemaVersion)}`,
+    )
+  }
+  if (
+    jsonType(capabilities.executionModel) === 'string'
+    && capabilities.executionModel !== 'one-shot'
+  ) {
+    violations.push(
+      `dsh.capabilities.executionModel must be "one-shot", received ${JSON.stringify(capabilities.executionModel)}`,
+    )
+  }
+  if (
+    jsonType(capabilities.sessionLifecycle) === 'string'
+    && capabilities.sessionLifecycle !== 'ephemeral'
+  ) {
+    violations.push(
+      `dsh.capabilities.sessionLifecycle must be "ephemeral", received ${JSON.stringify(capabilities.sessionLifecycle)}`,
+    )
+  }
+  for (const key of ['continuation', 'resume', 'pooling'] as const) {
+    if (jsonType(capabilities[key]) === 'boolean' && capabilities[key] !== false) {
+      violations.push(
+        `dsh.capabilities.${key} must be false, received ${JSON.stringify(capabilities[key])}`,
+      )
+    }
+  }
+  return violations
+}
+
+describe('dsh capability descriptor', () => {
+  it('declares schema version 1 beside the unchanged dsh.bundle metadata', () => {
+    const manifest = readPackageManifest()
+    const dsh = manifest.dsh as Record<string, unknown> | undefined
+    expect(dsh?.bundle).toEqual({ patch: './cordis.patch.yml' })
+    expect(Object.keys(dsh ?? {}).sort()).toEqual(['bundle', 'capabilities'])
+    expect(dsh?.capabilities).toEqual({
+      schemaVersion: 1,
+      executionModel: 'one-shot',
+      sessionLifecycle: 'ephemeral',
+      continuation: false,
+      resume: false,
+      pooling: false,
+    })
+  })
+
+  it('declares exactly the six capability keys with their JSON types', () => {
+    const manifest = readPackageManifest()
+    const capabilities = (manifest.dsh as Record<string, unknown> | undefined)?.capabilities
+    expect(capabilityViolations(capabilities)).toEqual([])
+    expect(Object.keys(capabilities ?? {}).sort()).toEqual([...CAPABILITY_KEYS].sort())
+    for (const key of CAPABILITY_KEYS) {
+      expect(jsonType((capabilities as Record<string, unknown> | undefined)?.[key]))
+        .toBe(CAPABILITY_JSON_TYPES[key])
+    }
+  })
+})
+
+describe('dsh capability descriptor rejection', () => {
+  const validCapabilities = (): Record<string, unknown> => ({ ...SCHEMA_V1_CAPABILITIES })
+
+  it('rejects a missing capability field', () => {
+    const capabilities = validCapabilities()
+    delete capabilities.resume
+    expect(capabilityViolations(capabilities)).toEqual([
+      'dsh.capabilities.resume is missing',
+    ])
+  })
+
+  it('rejects an unknown extra capability field', () => {
+    expect(capabilityViolations({ ...validCapabilities(), streaming: true })).toEqual([
+      'dsh.capabilities.streaming is unknown to schema version 1',
+    ])
+  })
+
+  it('rejects schemaVersion as the string "1"', () => {
+    expect(capabilityViolations({ ...validCapabilities(), schemaVersion: '1' })).toEqual([
+      'dsh.capabilities.schemaVersion must be a JSON number, received string',
+    ])
+  })
+
+  it.each(['continuation', 'resume', 'pooling'] as const)(
+    'rejects %s flipped from false to true',
+    (key) => {
+      expect(capabilityViolations({ ...validCapabilities(), [key]: true })).toEqual([
+        `dsh.capabilities.${key} must be false, received true`,
+      ])
+    },
+  )
+
+  it('rejects an unsupported executionModel', () => {
+    expect(capabilityViolations({ ...validCapabilities(), executionModel: 'persistent' }))
+      .toEqual([
+        'dsh.capabilities.executionModel must be "one-shot", received "persistent"',
+      ])
+  })
+
+  it('rejects an unsupported sessionLifecycle', () => {
+    expect(capabilityViolations({ ...validCapabilities(), sessionLifecycle: 'durable' }))
+      .toEqual([
+        'dsh.capabilities.sessionLifecycle must be "ephemeral", received "durable"',
+      ])
+  })
+})
+
 describe('official spawn projection', () => {
   it('forwards command, arguments, cwd, environment, and signal exactly', () => {
     vi.stubEnv('SDK_REMOVED_AMBIENT', 'ambient-value')
